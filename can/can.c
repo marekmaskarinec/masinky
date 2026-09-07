@@ -1,6 +1,3 @@
-/* Small example showing how to use the SWIO programming pin to
-   do printf through the debug interface */
-
 #include "ch32fun.h"
 #include "ch32v20xhw.h"
 #include "funconfig.h"
@@ -127,6 +124,8 @@ can_get_apb1_div(void)
 static void
 can_init(void)
 {
+	printf("Init CAN\n");
+
 	RCC->APB1PCENR |= RCC_APB1Periph_CAN1;
 	RCC->APB2PCENR |= RCC_APB2Periph_AFIO;
 
@@ -150,11 +149,9 @@ can_init(void)
 	// Initialise
 	CAN1->CTLR |= CAN_CTLR_INRQ | CAN_CTLR_NART;
 
-	printf("Entering CAN Init mode...\n");
 	// Wait for intialisation to complete
 	while (!(CAN1->STATR & CAN_STATR_INAK))
 		;
-	printf("Done\n");
 
 	printf("System Core Clock: %uMHz\n", FUNCONF_SYSTEM_CORE_CLOCK / 1000000);
 
@@ -188,11 +185,9 @@ can_init(void)
 
 	CAN1->CTLR &= ~(1 << 16UL);
 	CAN1->CTLR &= ~(uint32_t)CAN_CTLR_INRQ;
-	printf("Exiting CAN Init mode...\n");
 	// Wait for intialisation to complete
 	while (CAN1->STATR & CAN_STATR_INAK)
 		;
-	printf("CAN initialisation complete\n");
 }
 
 static int
@@ -274,19 +269,23 @@ static uint32_t g_esig;
 static void
 esig_init(void)
 {
+	printf("Init ESIG\n");
 	g_esig = ESIG->UID0 ^ ESIG->UID1 ^ ESIG->UID2;
 }
 
 static void
-process_uart_rx(void)
+process_uart(void)
 {
+	if (!g_uart_data_rdy)
+		return;
+	g_uart_data_rdy = 0;
+
 	static char buf[UART_BUF_SIZE + 1];
 	const size_t len = g_uart_data_len;
 	for (size_t i = 0; i < len; i++) {
 		buf[i] = g_uart_data[g_uart_data_idx][i];
 	}
 	buf[len] = 0;
-	printf("line=%s, err=%x\n", buf, g_uart_rx_err);
 
 	if (strcmp(buf, "ping\n") == 0) {
 		printf("pong\n");
@@ -306,9 +305,8 @@ process_can(void)
 	static uint8_t data[32];
 
 	const uint32_t messages = CAN1->RFIFO0 & CAN_RFIFO0_FMP0;
-	if (!messages) {
+	if (!messages)
 		return;
-	}
 
 	uint32_t id = 0;
 	const size_t numbytes = can_rx(data, &id, CAN_FIFO);
@@ -329,17 +327,17 @@ main()
 
 	Delay_Ms(200);
 
-	esig_init();
 #ifdef APPCONF_UART
 	uart_init();
 #endif
+	printf("Hello :)\nBuild  " __DATE__ " " __TIME__ "\n");
+	esig_init();
 	can_init();
 
+	printf("Init completed\n");
+
 	while (1) {
-		if (g_uart_data_rdy) {
-			process_uart_rx();
-			g_uart_data_rdy = 0;
-		}
+		process_uart();
 		process_can();
 		Delay_Ms(1);
 	}
