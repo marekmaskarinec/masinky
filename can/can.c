@@ -3,27 +3,19 @@
 
 #include "ch32fun.h"
 #include "ch32v20xhw.h"
+#include "funconfig.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef APPCONF_UART
 #define UART_BUF_SIZE 32
 
-static volatile bool g_uart_tx_dma_busy = false;
 static volatile bool g_uart_rx_err = false;
 static volatile char g_uart_data[2][UART_BUF_SIZE];
 static volatile size_t g_uart_data_len;
 static volatile size_t g_uart_data_idx = 0;
 static volatile bool g_uart_data_rdy = false;
-// DMA transfer completion interrupt. It will fire when the DMA transfer is
-// complete.
-__attribute__((interrupt)) __attribute__((section(".srodata"))) void
-DMA1_Channel7_IRQHandler(void)
-{
-	// Clear flag
-	DMA1->INTFCR |= DMA_CTCIF7;
-	g_uart_tx_dma_busy = false;
-}
 
 __attribute__((interrupt)) __attribute__((section(".srodata"))) void
 USART2_IRQHandler(void)
@@ -66,55 +58,215 @@ uart_init(void)
 	// baud = FCLK / (16 * USARTDIV)
 	// 115200 == 144MHz / (16 * USARTDIV)
 	// USARTDIV == 78.125 == 78 + (2/16)
-	USART2->BRR = (65 << 3) | 2;
+	// NOTE: This value works only when the debugger isn't attached. In case UART
+	// is needed with a debugger, 65.125 should be used.
+	USART2->BRR = (78 << 3) | 2;
 	// USART2->BRR = USART2->BRR = (((FUNCONF_SYSTEM_CORE_CLOCK) + (baud_rate) / 2) /
 	// (baud_rate));
 	USART2->CTLR1 |= CTLR1_UE_Set | USART_CTLR1_RE;
-
-	// Init DMA TX on channel 7
-	USART2->CTLR3 = USART_DMAReq_Tx;
-	// Disable channel just in case there is a transfer in progress
-	DMA1_Channel7->CFGR &= ~DMA_CFGR1_EN;
-	DMA1_Channel7->PADDR = (intptr_t)&USART2->DATAR;
-	// MEM2MEM: 0 (memory to peripheral)
-	// PL: 0 (low priority since UART is a relatively slow peripheral)
-	// MSIZE/PSIZE: 0 (8-bit)
-	// MINC: 1 (increase memory address)
-	// CIRC: 0 (one shot)
-	// DIR: 1 (read from memory)
-	// TEIE: 0 (no tx error interrupt)
-	// HTIE: 0 (no half tx interrupt)
-	// TCIE: 1 (transmission complete interrupt enable)
-	// EN: 0 (do not enable DMA yet)
-	DMA1_Channel7->CFGR = DMA_CFGR1_MINC | DMA_CFGR1_DIR | DMA_CFGR1_TCIE;
-	NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 	USART2->CTLR1 |= USART_CTLR1_RXNEIE;
 	NVIC_EnableIRQ(USART2_IRQn);
 }
 
-static int
-uart_tx(const char *buf, size_t size)
+int
+putchar(int c)
+{
+	int timeout = 1000000;
+	while (!(USART2->STATR & USART_FLAG_TC) && --timeout)
+		;
+	if (timeout == 0)
+		return 0;
+	USART2->DATAR = c;
+	return 1;
+}
+
+int
+_write(int fd, const char *buf, int size)
 {
 	for (size_t i = 0; i < size; i++) {
-		while (!(USART2->STATR & USART_FLAG_TC))
-			;
-		USART2->DATAR = *buf++;
+		putchar(buf[i]);
 	}
 	return size;
 }
+#endif
+
+// These values are calculated based on the system clock clock being 144MHz
+// The print function bellow will print the actual baud rate
+// if the clock or divider is different.
+//                     TS1           TS2            BRP
+#define AHB1_DIV 1
+#define CAN_BAUD_25kbps ((5 << 16) | (4 << 20) | (479 / AHB1_DIV))
+#define CAN_BAUD_50kbps ((5 << 16) | (4 << 20) | (239 / AHB1_DIV))
+#define CAN_BAUD_100kbps ((5 << 16) | (4 << 20) | (119 / AHB1_DIV))
+#define CAN_BAUD_125kbps ((5 << 16) | (4 << 20) | (59 / AHB1_DIV))
+#define CAN_BAUD_250kbps ((5 << 16) | (4 << 20) | (47 / AHB1_DIV))
+#define CAN_BAUD_500kbps ((5 << 16) | (4 << 20) | (23 / AHB1_DIV))
+#define CAN_BAUD_750kbps ((5 << 16) | (4 << 20) | (11 / AHB1_DIV))
+#define CAN_BAUD_1Mbps ((5 << 16) | (4 << 20) | (7 / AHB1_DIV))
+#define CAN_BAUD CAN_BAUD_1Mbps
+#define CAN_FIFO 0
+#define CAN_STATUS_OK (CAN_TSTATR_RQCP0 | CAN_TSTATR_TXOK0)
+
+static inline uint32_t
+can_get_apb1_div(void)
+{
+	// Get APB1 clock divider
+	if (RCC->CFGR0 & RCC_PPRE1_DIV2)
+		return 2;
+	else if (RCC->CFGR0 & RCC_PPRE1_DIV4)
+		return 4;
+	else if (RCC->CFGR0 & RCC_PPRE1_DIV8)
+		return 8;
+	else if (RCC->CFGR0 & RCC_PPRE1_DIV16)
+		return 16;
+	else
+		return 1; // No division
+}
+
+static void
+can_init(void)
+{
+	RCC->APB1PCENR |= RCC_APB1Periph_CAN1;
+	RCC->APB2PCENR |= RCC_APB2Periph_AFIO;
+
+	// Configure AF remapping for CAN
+	AFIO->PCFR1 &= ~AFIO_PCFR1_CAN_REMAP;	    // Clear remap bits
+	AFIO->PCFR1 |= AFIO_PCFR1_CAN_REMAP_REMAP1; // Set PA11 and PA12 for CAN RX and TX
+
+	// Configure GPIO
+	funPinMode(PA11, GPIO_CFGLR_IN_FLOAT);
+	funPinMode(PA12, GPIO_CFGLR_OUT_50Mhz_AF_PP);
+
+	// Pull down CAN_STB
+	funPinMode(PA1, GPIO_CFGLR_OUT_10Mhz_PP);
+	funDigitalWrite(PA1, FUN_LOW);
+	// Pull up CAN_VIO
+	funPinMode(PA5, GPIO_CFGLR_OUT_10Mhz_PP);
+	funDigitalWrite(PA5, FUN_HIGH);
+
+	// Wake up
+	CAN1->CTLR &= (~(uint32_t)CAN_CTLR_SLEEP);
+	// Initialise
+	CAN1->CTLR |= CAN_CTLR_INRQ | CAN_CTLR_NART;
+
+	printf("Entering CAN Init mode...\n");
+	// Wait for intialisation to complete
+	while (!(CAN1->STATR & CAN_STATR_INAK))
+		;
+	printf("Done\n");
+
+	printf("System Core Clock: %uMHz\n", FUNCONF_SYSTEM_CORE_CLOCK / 1000000);
+
+	CAN1->BTIMR = CAN_BAUD;
+	CAN1->BTIMR |= 0b11 << 24;
+
+	const uint32_t ts1 = (CAN1->BTIMR & CAN_BTIMR_TS1) >> 16;
+	const uint32_t ts2 = (CAN1->BTIMR & CAN_BTIMR_TS2) >> 20;
+	const uint32_t brp = CAN1->BTIMR & CAN_BTIMR_BRP;
+	const uint32_t sjw = (CAN1->BTIMR & CAN_BTIMR_SJW) >> 24;
+	const uint32_t baud =
+	    (FUNCONF_SYSTEM_CORE_CLOCK / can_get_apb1_div()) / ((ts1 + ts2 + 3) * (brp + 1));
+	printf("ts1=%lu,ts2=%lu,brp=%lu,sjw=%lu,baud=%lubps\n", ts1, ts2, brp, sjw, baud);
+
+	// Set up rx filter
+	CAN1->FCTLR |= FCTLR_FINIT; // Enter initialisation mode
+	{
+		static const size_t filter_id = 0; // Filter 0
+
+		// Set ID to match
+		CAN1->sFilterRegister[filter_id].FR1 = 0x0;
+		// Set which bits of the ID to match (mask)
+		CAN1->sFilterRegister[filter_id].FR2 = 0; // Accept all messages
+
+		CAN1->FAFIFOR = (CAN_FIFO << filter_id); // assign filter to FIFO
+		CAN1->FMCFGR = (0 << filter_id);	 // 1: id mode, 0: mask mode
+		CAN1->FSCFGR = (1 << filter_id);	 // 1: 32 bit filter, 0: 16 bit filter
+		CAN1->FWR = (1 << filter_id);		 // enable filter
+	}
+	CAN1->FCTLR &= ~FCTLR_FINIT; // Exit initialisation mode
+
+	CAN1->CTLR &= ~(1 << 16UL);
+	CAN1->CTLR &= ~(uint32_t)CAN_CTLR_INRQ;
+	printf("Exiting CAN Init mode...\n");
+	// Wait for intialisation to complete
+	while (CAN1->STATR & CAN_STATR_INAK)
+		;
+	printf("CAN initialisation complete\n");
+}
 
 static int
-uart_tx_dma(const char *buf, size_t size)
+can_tx(uint32_t id, const uint8_t *src, size_t size)
 {
-	g_uart_tx_dma_busy = true;
-	// Disable DMA channel (just in case a transfer is pending)
-	DMA1_Channel7->CFGR &= ~DMA_CFGR1_EN;
-	// Set transfer length and source address
-	DMA1_Channel7->CNTR = size;
-	DMA1_Channel7->MADDR = (intptr_t)buf;
-	// Enable DMA channel to start the transfer
-	DMA1_Channel7->CFGR |= DMA_CFGR1_EN;
+	int mailbox = -1;
+
+	if (CAN1->TSTATR & CAN_TSTATR_TME0)
+		mailbox = 0;
+	else if (CAN1->TSTATR & CAN_TSTATR_TME1)
+		mailbox = 1;
+	else if (CAN1->TSTATR & CAN_TSTATR_TME2)
+		mailbox = 2;
+
+	if (-1 != mailbox) {
+		// Set ID
+		CAN1->sTxMailBox[mailbox].TXMIR = (id << 21) & CAN_TXMI0R_STID;
+
+		// Set data length
+		CAN1->sTxMailBox[mailbox].TXMDTR = size & 0x0F;
+
+		// Clear Data
+		CAN1->sTxMailBox[mailbox].TXMDLR = 0;
+		CAN1->sTxMailBox[mailbox].TXMDHR = 0;
+
+		for (size_t i = 0; i < size; i++)
+			if (i < 4)
+				CAN1->sTxMailBox[mailbox].TXMDLR |= ((uint32_t)src[i] << (i * 8));
+			else
+				CAN1->sTxMailBox[mailbox].TXMDHR |=
+				    ((uint32_t)src[i] << ((i - 4) * 8));
+
+		CAN1->sTxMailBox[mailbox].TXMIR |= CAN_TXMI0R_TXRQ;
+	}
+	return mailbox;
+}
+
+static int
+can_message_sent(int mailbox)
+{
+	if (mailbox < 0 || mailbox > 2)
+		return 0;
+
+	const uint32_t status = (CAN1->TSTATR >> (mailbox * 8)) & 0xFF;
+
+	const int sent = (status & CAN_STATUS_OK) == CAN_STATUS_OK;
+	const int mailbox_empty = (CAN1->TSTATR >> (26 + mailbox)) & 1;
+
+	return sent && mailbox_empty;
+}
+
+static size_t
+can_rx(uint8_t *dst, uint32_t *id, uint8_t fifo)
+{
+	// Get ID
+	if (CAN_RXMI0R_IDE & CAN1->sFIFOMailBox[fifo].RXMIR)
+		*id = (CAN_RXMI0R_EXID & (uint32_t)CAN1->sFIFOMailBox[fifo].RXMIR) >> 3;
+	else
+		*id = (CAN_RXMI0R_STID & (uint32_t)CAN1->sFIFOMailBox[fifo].RXMIR) >> 21;
+
+	size_t size = CAN_RXMDT0R_DLC & CAN1->sFIFOMailBox[fifo].RXMDTR;
+
+	for (size_t i = 0; i < size; i++)
+		if (i < 4)
+			dst[i] = CAN1->sFIFOMailBox[fifo].RXMDLR >> (i * 8);
+		else
+			dst[i] = CAN1->sFIFOMailBox[fifo].RXMDHR >> ((i - 4) * 8);
+
+	// Release the FIFO
+	if (fifo == 0)
+		CAN1->RFIFO0 |= CAN_RFIFO0_RFOM0;
+	else
+		CAN1->RFIFO1 |= CAN_RFIFO1_RFOM1;
+
 	return size;
 }
 
@@ -137,14 +289,33 @@ process_uart_rx(void)
 	printf("line=%s, err=%x\n", buf, g_uart_rx_err);
 
 	if (strcmp(buf, "ping\n") == 0) {
-		strncpy(buf, "pong\n", sizeof(buf) - 1);
+		printf("pong\n");
 	} else if (strcmp(buf, "esig\n") == 0) {
-		sprintf(buf, "%08lX\n", g_esig);
+		printf("%08lX\n", g_esig);
+	} else if (strstr(buf, "cantx") == buf) {
+		can_tx(0x123, buf, len);
+		printf("ok\n");
 	} else {
-		strncpy(buf, "err\n", sizeof(buf) - 1);
+		printf("err\n");
+	}
+}
+
+static void
+process_can(void)
+{
+	static uint8_t data[32];
+
+	const uint32_t messages = CAN1->RFIFO0 & CAN_RFIFO0_FMP0;
+	if (!messages) {
+		return;
 	}
 
-	uart_tx(buf, strlen(buf));
+	uint32_t id = 0;
+	const size_t numbytes = can_rx(data, &id, CAN_FIFO);
+	printf("msg rx: id=%lu, data=", id);
+	for (int i = 0; i < numbytes; i++)
+		printf("%02x", data[i]);
+	putchar('\n');
 }
 
 int
@@ -156,14 +327,20 @@ main()
 	// Enable GPIOs
 	RCC->APB2PCENR |= RCC_APB2Periph_GPIOD | RCC_APB2Periph_GPIOC;
 
+	Delay_Ms(200);
+
 	esig_init();
+#ifdef APPCONF_UART
 	uart_init();
+#endif
+	can_init();
 
 	while (1) {
 		if (g_uart_data_rdy) {
 			process_uart_rx();
 			g_uart_data_rdy = 0;
 		}
+		process_can();
 		Delay_Ms(1);
 	}
 }
