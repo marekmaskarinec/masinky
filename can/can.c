@@ -1,9 +1,12 @@
+#include "canmsg.h"
 #include "ch32fun.h"
 #include "ch32v20xhw.h"
 #include "funconfig.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+static uint32_t g_esig;
 
 #ifdef APPCONF_UART
 #define UART_BUF_SIZE 32
@@ -226,6 +229,15 @@ can_tx(uint32_t id, const uint8_t *src, size_t size)
 }
 
 static int
+can_tx_msg(struct canmsg msg)
+{
+	if (msg.esig == 0)
+		msg.esig = g_esig;
+
+	return can_tx(msg.id, (void *)&msg.esig, msg.msize + sizeof(msg.esig));
+}
+
+static int
 can_message_sent(int mailbox)
 {
 	if (mailbox < 0 || mailbox > 2)
@@ -265,7 +277,6 @@ can_rx(uint8_t *dst, uint32_t *id, uint8_t fifo)
 	return size;
 }
 
-static uint32_t g_esig;
 static void
 esig_init(void)
 {
@@ -273,6 +284,7 @@ esig_init(void)
 	g_esig = ESIG->UID0 ^ ESIG->UID1 ^ ESIG->UID2;
 }
 
+#ifdef APPCONF_UART
 static void
 process_uart(void)
 {
@@ -288,21 +300,26 @@ process_uart(void)
 	buf[len] = 0;
 
 	if (strcmp(buf, "ping\n") == 0) {
-		printf("pong\n");
+		printf("> pong\n");
 	} else if (strcmp(buf, "esig\n") == 0) {
-		printf("%08lX\n", g_esig);
+		printf("> %08lX\n", g_esig);
 	} else if (strstr(buf, "cantx") == buf) {
 		can_tx(0x123, buf, len);
-		printf("ok\n");
+		printf("> ok\n");
+	} else if (strstr(buf, "scan") == buf) {
+		can_tx_msg((struct canmsg){.id = CANID_SCAN});
+		printf("> ok\n");
 	} else {
-		printf("err\n");
+		printf("> err\n");
 	}
 }
+#endif
 
 static void
 process_can(void)
 {
 	static uint8_t data[32];
+	static struct canmsg msg;
 
 	const uint32_t messages = CAN1->RFIFO0 & CAN_RFIFO0_FMP0;
 	if (!messages)
@@ -310,10 +327,19 @@ process_can(void)
 
 	uint32_t id = 0;
 	const size_t numbytes = can_rx(data, &id, CAN_FIFO);
-	printf("msg rx: id=%lu, data=", id);
+	if (numbytes <= sizeof(struct canmsg))
+		memcpy(&msg.esig, data, numbytes);
+
+	printf("> msg rx: id=%lu, data=", id);
 	for (int i = 0; i < numbytes; i++)
 		printf("%02x", data[i]);
 	putchar('\n');
+
+	switch (id) {
+	case CANID_SCAN: can_tx_msg((struct canmsg){.id = CANID_SCAN_RESP}); break;
+	case CANID_SCAN_RESP: printf("> scan rx: %08lX\n", msg.esig); break;
+	default: break;
+	}
 }
 
 int
@@ -336,8 +362,13 @@ main()
 
 	printf("Init completed\n");
 
+	printf("Sending init scanresp\n");
+	can_tx_msg((struct canmsg){.id = CANID_SCAN_RESP});
+
 	while (1) {
+#ifdef APPCONF_UART
 		process_uart();
+#endif
 		process_can();
 		Delay_Ms(1);
 	}
