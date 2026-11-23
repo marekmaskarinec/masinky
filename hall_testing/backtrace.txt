@@ -1,0 +1,8 @@
+0x00000860
+/home/marek/dev/train_ws/train/hall_testing/hall.c:84 (discriminator 1)
+0x00001888
+??:0
+0x00000000
+/home/marek/dev/train_ws/train/hall_testing/../ch32fun/ch32fun/ch32fun.c:1109
+0x80000022
+??:0

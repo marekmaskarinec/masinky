@@ -281,6 +281,7 @@ static void
 esig_init(void)
 {
 	printf("Init ESIG\n");
+	printf("UID0=%08lX, UID1=%08lX, UID2=%08lX\n", ESIG->UID0, ESIG->UID1, ESIG->UID2);
 	g_esig = ESIG->UID0 ^ ESIG->UID1 ^ ESIG->UID2;
 }
 
