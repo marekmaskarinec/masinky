@@ -18,6 +18,14 @@ ADC1_2_IRQHandler(void)
 	}
 }
 
+static volatile int g_cc_count = 0;
+
+__attribute__((interrupt)) __attribute__((section(".srodata"))) void
+TIM2_IRQHandler(void)
+{
+	g_cc_count++;
+}
+
 int last = 0;
 void
 handle_debug_input(int numbytes, uint8_t *data)
@@ -57,6 +65,9 @@ adc_init(void)
 	// ADC1->CTLR1 |= ADC_AWDSGL;
 	// ADC1->CTLR1 |= ADC_AWDCH_2;
 
+	// Enable trigger on Tim2 CC2
+	ADC1->CTLR2 |= ADC_EXTSEL_1 | ADC_EXTSEL_0 | ADC_EXTTRIG;
+
 	// turn on ADC and set rule group to sw trig
 	ADC1->CTLR2 |= ADC_ADON;
 
@@ -94,6 +105,30 @@ adc_get(void)
 // Regular value: 1400
 // Train value: 1700
 
+static void
+tim2_init(void)
+{
+	RCC->APB1PCENR |= RCC_APB1Periph_TIM2;
+	RCC->APB1PRSTR |= RCC_APB1Periph_TIM2;
+	RCC->APB1PRSTR &= ~RCC_APB1Periph_TIM2;
+
+	// SMCFGR: default clk input is CK_INT
+	// set TIM2 clock prescaler divider
+	TIM2->PSC = 2000;
+	TIM2->CTLR1 |= TIM_ARPE;
+
+	TIM2->CH2CVR = 2399;
+	TIM2->CHCTLR1 |= TIM_OC2M_2 | TIM_OC2M_1;
+	TIM2->CCER |= TIM_CC2E;
+	TIM2->ATRLR = 2400;
+	TIM2->INTFR |= TIM_CC2IF;
+	NVIC_EnableIRQ(TIM2_IRQn);
+
+	TIM2->SWEVGR |= TIM_CC2G | TIM_UG;
+	TIM2->SWEVGR |= TIM_UG;
+	TIM2->CTLR1 |= TIM_CEN;
+}
+
 int
 main()
 {
@@ -105,10 +140,12 @@ main()
 	// Enable GPIOs
 	funGpioInitAll();
 	adc_init();
+	tim2_init();
 
+	// adc_get();
 	while (1) {
 		// uint16_t val = adc_get();
-		printf("%d, AWD=%d, g_awd_count=%d\n", 0, !!(ADC1->STATR & ADC_AWD), g_awd_count);
+		printf("%d %d\n", ADC1->RDATAR, g_awd_count);
 		Delay_Ms(10);
 	}
 }
