@@ -3,35 +3,35 @@
 
 #include "ch32fun.h"
 #include "ch32v20xhw.h"
+#include <stdbool.h>
 #include <stdio.h>
 
-uint32_t count;
-
-static volatile int g_awd_count = 0;
+static volatile int g_train_ev = 0;
+static volatile int g_train = 0;
 
 __attribute__((interrupt)) __attribute__((section(".srodata"))) void
 ADC1_2_IRQHandler(void)
 {
-	if (ADC1->STATR & ADC_AWD) {
-		ADC1->STATR &= ~ADC_AWD;
-		g_awd_count++;
+	// if (ADC1->STATR & ADC_AWD) {
+	// 	ADC1->STATR &= ~ADC_AWD;
+	// 	g_awd_count++;
+	// }
+
+	if (ADC1->STATR & ADC_EOC) {
+		static bool last_train = 0;
+		static uint32_t last_change = 0;
+
+		// Reading the result also clears the EOC bit.
+		uint32_t val = ADC1->RDATAR;
+		bool train = val > 1450 || val < 1350;
+		if (train != last_train) {
+			last_train = train;
+			last_change = SysTick->CNT;
+		} else if (train != g_train && SysTick->CNT - last_change > 50 * DELAY_MS_TIME) {
+			g_train_ev = 1;
+			g_train = train;
+		}
 	}
-}
-
-static volatile int g_cc_count = 0;
-
-__attribute__((interrupt)) __attribute__((section(".srodata"))) void
-TIM2_IRQHandler(void)
-{
-	g_cc_count++;
-}
-
-int last = 0;
-void
-handle_debug_input(int numbytes, uint8_t *data)
-{
-	last = data[0];
-	count += numbytes;
 }
 
 static void
@@ -57,10 +57,10 @@ adc_init(void)
 	// Set sampling time for channel 2 to 239 cycles
 	ADC1->SAMPTR2 = ADC_SampleTime_239Cycles5 << (2 * 3);
 
-	ADC1->WDLTR = 1350;
-	ADC1->WDHTR = 1450;
-	ADC1->CTLR1 |= ADC_AWDEN;
-	ADC1->CTLR1 |= ADC_AWDIE;
+	// ADC1->WDLTR = 1350;
+	// ADC1->WDHTR = 1450;
+	// ADC1->CTLR1 |= ADC_AWDEN;
+	// ADC1->CTLR1 |= ADC_AWDIE;
 	NVIC_EnableIRQ(ADC_IRQn);
 	// ADC1->CTLR1 |= ADC_AWDSGL;
 	// ADC1->CTLR1 |= ADC_AWDCH_2;
@@ -82,6 +82,8 @@ adc_init(void)
 	ADC1->CTLR2 |= ADC_CAL;
 	while (ADC1->CTLR2 & ADC_CAL)
 		;
+
+	ADC1->CTLR1 |= ADC_EOCIE;
 }
 
 /*
@@ -121,8 +123,6 @@ tim2_init(void)
 	TIM2->CHCTLR1 |= TIM_OC2M_2 | TIM_OC2M_1;
 	TIM2->CCER |= TIM_CC2E;
 	TIM2->ATRLR = 2400;
-	TIM2->INTFR |= TIM_CC2IF;
-	NVIC_EnableIRQ(TIM2_IRQn);
 
 	TIM2->SWEVGR |= TIM_CC2G | TIM_UG;
 	TIM2->SWEVGR |= TIM_UG;
@@ -142,10 +142,18 @@ main()
 	adc_init();
 	tim2_init();
 
+	int ev_count = 0;
+
 	// adc_get();
 	while (1) {
 		// uint16_t val = adc_get();
-		printf("%d %d\n", ADC1->RDATAR, g_awd_count);
-		Delay_Ms(10);
+		printf(
+		    "%d %d %d %d\n", ADC1->RDATAR, g_train * 100, g_train_ev * 200, ev_count * 10);
+		if (g_train_ev) {
+			ev_count++;
+			printf("train event\n");
+			g_train_ev = 0;
+		}
+		Delay_Ms(20);
 	}
 }
